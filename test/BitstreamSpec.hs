@@ -30,7 +30,7 @@ isBinary = all (flip elem ['0','1'])
 instance IsString Buff where
   fromString s | length s > 8       = error $ "cannot create buffer from " ++ s ++ "; more than eight bits"
                | not . isBinary $ s = error $ "cannot create buffer from " ++ s ++ "; elements must be 0 or 1"
-               | otherwise          = Buff (length s, foldl f zeroBits (indexed s))
+               | otherwise          = mkBuff (length s) (foldl f zeroBits (indexed s))
     where indexed :: [a] -> [(Int, a)]
           indexed = zip [0..]
           f :: Word8 -> (Int, Char) -> Word8
@@ -88,11 +88,11 @@ spec_helper :: Spec
 spec_helper = do
   describe "Buff" $ do
     it "has an IsString instance" $ do
-      "0" `shouldBe` (Buff (1,0b00000000))
-      "1" `shouldBe` (Buff (1,0b00000001))
-      "11" `shouldBe` (Buff (2,0b00000011))
-      "10100101" `shouldBe` (Buff (8, 0b10100101))
-      "10101010" `shouldBe` (Buff (8, 0b01010101))
+      "0" `shouldBe` (mkBuff 1 0b00000000)
+      "1" `shouldBe` (mkBuff 1 0b00000001)
+      "11" `shouldBe` (mkBuff 2 0b00000011)
+      "10100101" `shouldBe` (mkBuff 8 0b10100101)
+      "10101010" `shouldBe` (mkBuff 8 0b01010101)
 
   describe "Word8" $ do
     it "has an IsString instance" $ do
@@ -104,41 +104,41 @@ spec_helper = do
   describe "List Stream" $ do
     it "has an IsString isntance" $ do
       ls "" `shouldBe` (S [] nullBuff 0) 
-      ls "1" `shouldBe` (S [] (Buff (1,0b00000001)) 1)
-      ls "10101010 101" `shouldBe` (S [0b01010101] (Buff (3, 0b00000101)) 11)
+      ls "1" `shouldBe` (S [] (mkBuff 1 0b00000001) 1)
+      ls "10101010 101" `shouldBe` (S [0b01010101] (mkBuff 3 0b00000101) 11)
 
 spec_buff :: Spec
 spec_buff = do
   describe "Buff" $ do
     it "should add" $ do
       nullBuff `addBuff` nullBuff
-        `shouldBe` (Nothing,nullBuff)
-      nullBuff `addBuff` (Buff (4,0b00000101))
-        `shouldBe` (Nothing, (Buff (4,0b00000101)))
-      (Buff (1,0b00000001)) `addBuff` (Buff (1,0b00000001))
-        `shouldBe` (Nothing, (Buff (2,0b00000011)))
-      (Buff (4,0b00000101)) `addBuff` (Buff (4,0b00000101))
+        `shouldBe` (Nothing, nullBuff)
+      nullBuff `addBuff` (mkBuff 4 0b00000101)
+        `shouldBe` (Nothing, mkBuff 4 0b00000101)
+      (mkBuff 1 0b00000001) `addBuff` (mkBuff 1 0b00000001)
+        `shouldBe` (Nothing, mkBuff 2 0b00000011)
+      (mkBuff 4 0b00000101) `addBuff` (mkBuff 4 0b00000101)
         `shouldBe` (Just 0b01010101, nullBuff)
-      (Buff (6,0b00010101)) `addBuff` (Buff (4,0b00001010))
-        `shouldBe` (Just 0b10010101, (Buff (2,0b00000010)))
-      (Buff (6,0b00010101)) `addBuff` (Buff (7,0b01010101))
-        `shouldBe` (Just 0b01010101, (Buff (5,0b00010101)))
+      (mkBuff 6 0b00010101) `addBuff` (mkBuff 4 0b00001010)
+        `shouldBe` (Just 0b10010101, (mkBuff 2 0b00000010))
+      (mkBuff 6 0b00010101) `addBuff` (mkBuff 7 0b01010101)
+        `shouldBe` (Just 0b01010101, (mkBuff 5 0b00010101))
 
 spec_stream :: Spec
 spec_stream = do
   describe "Stream" $ do
     it "should be a monoid" $ do
-      (S []  nullBuff 0 `mappend` S []  (Buff (4,0b10100000)) 4)
-        `shouldBe` (S []    (Buff (4,0b10100000)) 4)  
-      (S [1] nullBuff 8 `mappend` S [2] (Buff (4,0b10100000)) 12)
-        `shouldBe` (S [1,2] (Buff (4,0b10100000)) 20)
-      (S []  (Buff (4,0b00001010)) 4 `mappend` S [] (Buff (4,0b00000101)) 4)
+      (S []  nullBuff 0 `mappend` S []  (mkBuff 4 0b10100000) 4)
+        `shouldBe` (S []    (mkBuff 4 0b10100000) 4)  
+      (S [1] nullBuff 8 `mappend` S [2] (mkBuff 4 0b10100000) 12)
+        `shouldBe` (S [1,2] (mkBuff 4 0b10100000) 20)
+      (S []  (mkBuff 4 0b00001010) 4 `mappend` S [] (mkBuff 4 0b00000101) 4)
         `shouldBe` (S [0b01011010] nullBuff 8)
 
       --   101 + 10101010 101
       -- = 10110101 010101
-      (S [] (Buff (3,0b00000101)) 3) `mappend` (S [0b01010101] (Buff (3,0b00000101)) 11)
-        `shouldBe` (S [0b10101101] (Buff (6, 0b00101010)) 14)
+      (S [] (mkBuff 3 0b00000101) 3) `mappend` (S [0b01010101] (mkBuff 3 0b00000101) 11)
+        `shouldBe` (S [0b10101101] (mkBuff 6 0b00101010) 14)
 
       ls "101" `mappend` (ls "10101010 101") `shouldBe` (ls "10110101 010101")
 
@@ -148,8 +148,8 @@ spec_stream = do
       ls "01010101 101" `mappend` (ls "10101010 11001100 000111")
         `shouldBe` (ls "01010101 10110101 01011001 10000011 1")
       
-      (S [0b10101010] (Buff (3,0b00000101)) 11) `mappend` (S [0b01010101, 0b00110011] (Buff (6,0b00111000)) 22)
-        `shouldBe` (S [0b10101010,0b10101101,0b10011010,0b11000001] (Buff (1,0b00000001)) 33)
+      (S [0b10101010] (mkBuff 3 0b00000101) 11) `mappend` (S [0b01010101, 0b00110011] (mkBuff 6 0b00111000) 22)
+        `shouldBe` (S [0b10101010,0b10101101,0b10011010,0b11000001] (mkBuff 1 0b00000001) 33)
 
 spec_bitstream :: Spec
 spec_bitstream = do
