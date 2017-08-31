@@ -10,6 +10,8 @@ import Test.Tasty.Hspec
 import Data.Bitstream
 import Data.ToBits
 
+import Data.ContBuff
+
 import Data.Bits (zeroBits, setBit)
 import Data.String (IsString(..))
 import Data.Word (Word8)
@@ -68,6 +70,31 @@ instance IsString (Stream [] a) where
           go s = let l = 8 * (length s `div` 8) in
                    (words $ take l s, b $ drop l s)
 
+-- instance IsString TStream where
+--   fromString = fromString' . filter (/= ' ')
+--     where fromString' :: String -> TStream
+--           fromString' s | not . isBinary $ s = error $ "cannot create TStream from " ++ s ++ "; elements must be 0 or 1"
+--                         | otherwise          = let (ws,b) = go s in TS (ws, b, (length s) `mod` buffSize)
+--           go :: String -> ([Word8],(Int, Word8)) -> ([Word8],(Int,Word8))
+--           go [] = (id,0)
+--           go xs = case splitAt buffSize xs of
+--             (h,[]) -> \x -> x `mappend` (TS ()) 
+--             (h, t) -> let (bs, b) = go t in ((word h:) . bs, b)
+--             where word :: String -> Word8
+--                   word x = foldr (uncurry bit) zeroBits (zip [0..] x) 
+
+instance IsString (BList Word8) where
+  fromString = fromString' . filter (/= ' ')
+    where fromString' :: String -> BList Word8
+          fromString' s | not . isBinary $ s = error $ "cannot create BList from " ++ s ++ "; elements must be 0 or 1"
+                        | otherwise          = BL $ go s
+          go :: String -> [Buffer Word8]
+          go = map toBuffer . chunksOf 8
+          toBuffer :: String -> Buffer Word8
+          toBuffer s = case length s of
+            l | l < 8     -> Partial l (p s)
+              | otherwise -> Full (w s)
+
 -- type helper.
 b :: String -> Buff
 b = fromString
@@ -75,12 +102,26 @@ b = fromString
 w :: String -> Word8
 w = fromString
 
+p :: String -> Word8
+p = fromString . take 8 . (++ "00000000") 
+
 words :: String -> [Word8]
 words = fromString
 
 ls :: String -> Stream [] Word8
 ls = fromString
 
+bl8 :: String -> BList Word8
+bl8 = fromString
+-- ts :: String -> TStream
+-- ts = fromString
+
+-- runTS :: TStream -> ([Word8], Int)
+-- runTS (TS (c, b, l)) | l > 0     = (c [b], l)
+--                      | otherwise = (c [], l)
+
+-- ts' :: String -> ([Word8], Int)
+-- ts' = runTS . ts
 
 -- * Specifications
 
@@ -102,10 +143,59 @@ spec_helper = do
       w "00000001" `shouldBe` 128
 
   describe "List Stream" $ do
-    it "has an IsString isntance" $ do
+    it "has an IsString instance" $ do
       ls "" `shouldBe` (S [] nullBuff 0) 
       ls "1" `shouldBe` (S [] (Buff (1,0b00000001)) 1)
       ls "10101010 101" `shouldBe` (S [0b01010101] (Buff (3, 0b00000101)) 11)
+
+  -- describe "TStream" $ do
+  --   it "has an IsString instance" $ do
+  --     ts' "" `shouldBe` ([],0)
+  --     ts' "0" `shouldBe` ([0],1)
+  --     ts' "1" `shouldBe` ([0b00000001],1)
+  --     ts' "10000000 1" `shouldBe` ([0b00000001,1], 1)
+
+  describe "BList" $ do
+    it "has an IsString instance" $ do
+      bl8 "" `shouldBe` (BL [])
+      bl8 "1" `shouldBe` (BL [Partial 1 0b00000001])
+      bl8 "11" `shouldBe` (BL [Partial 2 0b00000011])
+      bl8 "10101010" `shouldBe` (BL [Full 0b01010101])
+      bl8 "10101010 1010" `shouldBe` (BL [ Full 0b01010101
+                                         , Partial 4 0b00000101])
+
+spec_blist :: Spec
+spec_blist = do
+  describe "join" $ do
+    it "should join word8" $ do
+      join 0 (w "10000000") (w "10000000")
+        `shouldBe` (w "10000000", 0)
+      join 1 (w "10000000") (w "10000000")
+        `shouldBe` (w "11000000", 0)
+      join 2 (w "10000000") (w "10000000")
+        `shouldBe` (w "10100000", 0)
+      join 1 (w "10000000") (w "01101001")
+        `shouldBe` (w "10110100", w "10000000")
+      join 8 (w "00000001") (w "10000000")
+        `shouldBe` (w "00000001", w "10000000")
+
+  describe "BList Word8" $ do
+    it "should be a monoid" $ do
+      mempty `shouldBe` (BL [] :: BList Word8)
+      bl8 "1" `mappend` (bl8 "1")
+        `shouldBe` (bl8 "11")
+
+      bl8 "10" `mappend` bl8 "1010"
+        `shouldBe` bl8 "101010"
+
+      bl8 "101010" `mappend` (bl8 "111000")
+        `shouldBe` bl8 "101010 111000"
+
+      bl8 "101" `mappend` (bl8 "10101010 101")
+        `shouldBe` bl8 "10110101 010101"
+
+      bl8 "00000000 10101" `mappend` bl8 "11111111 001"
+        `shouldBe` bl8 "00000000 10101111 11111001"
 
 spec_buff :: Spec
 spec_buff = do
@@ -151,6 +241,19 @@ spec_stream = do
       (S [0b10101010] (Buff (3,0b00000101)) 11) `mappend` (S [0b01010101, 0b00110011] (Buff (6,0b00111000)) 22)
         `shouldBe` (S [0b10101010,0b10101101,0b10011010,0b11000001] (Buff (1,0b00000001)) 33)
 
+
+-- spec_tstream :: Spec
+-- spec_tstream = do
+--   describe "TStream" $ do
+--     it "should be a monoid" $ do
+--       runTS (ts "" `mappend` ts "") `shouldBe` ([],0)
+--       runTS (ts "" `mappend` ts "1010") `shouldBe` ([0b00000101], 4)
+--       runTS (ts "1010" `mappend` ts "") `shouldBe` ([0b00000101], 4)
+--       runTS (ts "1010" `mappend` ts "0011") `shouldBe` ([0b11000101], 0)
+
+--       ts "101" `mappend` ts "10101010 101"
+--         `shouldBe` ts "10110101 010101"
+
 spec_bitstream :: Spec
 spec_bitstream = do
   describe "Bitstream" $ do
@@ -182,22 +285,21 @@ spec_bitstream = do
       execBitstream 0 (emitFixed 6 1 >> emitFixed 6 2)
         `shouldBe` (words "100000 010000 0000")
       
-    it "should be able to emit a variable number of bits" $ do
-      execBitstream 0 (emitVBR 3 1) `shouldBe` (words "10000000")
-      execBitstream 0 (emitVBR 3 2) `shouldBe` (words "01000000")
-      execBitstream 0 (emitVBR 3 3) `shouldBe` (words "11000000")
-      execBitstream 0 (emitVBR 3 4) `shouldBe` (words "00110000")
-      execBitstream 0 (emitVBR 3 5) `shouldBe` (words "10110000")
-      execBitstream 0 (emitVBR 3 9) `shouldBe` (words "10101000")
-      
-      execBitstream 0 (emitVBR 4  0) `shouldBe` (words "00000000")
-      execBitstream 0 (emitVBR 4  1) `shouldBe` (words "10000000")
-      execBitstream 0 (emitVBR 4  2) `shouldBe` (words "01000000")
-      execBitstream 0 (emitVBR 4  4) `shouldBe` (words "00100000")
-      execBitstream 0 (emitVBR 4  8) `shouldBe` (words "00011000")
-      execBitstream 0 (emitVBR 4 16) `shouldBe` (words "00010100")
-      execBitstream 0 (emitVBR 4 32) `shouldBe` (words "00010010")
-      execBitstream 0 (emitVBR 4 64) `shouldBe` (words "00010001 10000000")
+    describe "should be able to emit a variable number of bits" $ do
+      it "emitVBR 3 9" $ execBitstream 0 (emitVBR 3 1) `shouldBe` (words "10000000")
+      it "emitVBR 3 2" $ execBitstream 0 (emitVBR 3 2) `shouldBe` (words "01000000")
+      it "emitVBR 3 3" $ execBitstream 0 (emitVBR 3 3) `shouldBe` (words "11000000")
+      it "emitVBR 3 4" $ execBitstream 0 (emitVBR 3 4) `shouldBe` (words "00110000")
+      it "emitVBR 3 5" $ execBitstream 0 (emitVBR 3 5) `shouldBe` (words "10110000")
+      it "emitVBR 3 9" $ execBitstream 0 (emitVBR 3 9) `shouldBe` (words "10101000")
+      it "emitVBR 4 0" $ execBitstream 0 (emitVBR 4  0) `shouldBe` (words "00000000")
+      it "emitVBR 4 1" $ execBitstream 0 (emitVBR 4  1) `shouldBe` (words "10000000")
+      it "emitVBR 4 2" $ execBitstream 0 (emitVBR 4  2) `shouldBe` (words "01000000")
+      it "emitVBR 4 4" $ execBitstream 0 (emitVBR 4  4) `shouldBe` (words "00100000")
+      it "emitVBR 4 8" $ execBitstream 0 (emitVBR 4  8) `shouldBe` (words "00011000")
+      it "emitVBR 4 16" $ execBitstream 0 (emitVBR 4 16) `shouldBe` (words "00010100")
+      it "emitVBR 4 32" $ execBitstream 0 (emitVBR 4 32) `shouldBe` (words "00010010")
+      it "emitVBR 4 64" $ execBitstream 0 (emitVBR 4 64) `shouldBe` (words "00010001 10000000")
 
     it "should be able to emit char6 encoded data" $ do
       execBitstream 0 (mapM emitChar6 ("abcd" :: String))

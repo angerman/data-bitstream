@@ -1,5 +1,5 @@
 {-# OPTIONS_GHC -fprof-auto #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving, StandaloneDeriving, KindSignatures, BinaryLiterals, RecursiveDo, LambdaCase #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving, StandaloneDeriving, KindSignatures, BinaryLiterals, RecursiveDo, LambdaCase, BangPatterns, FlexibleInstances #-}
 module Data.Bitstream
   ( Buff, nullBuff, addBuff, mkBuff
   , Bitstream, execBitstream, evalBitstream, runBitstream
@@ -19,6 +19,7 @@ module Data.Bitstream
   , writeFile, withHeader
   -- ** For testing
   , Stream(..), Buff(..), Bitstream(..)
+  -- , TStream(..), buffSize
   ) where
 
 import Prelude hiding (last, words, writeFile, tail)
@@ -34,15 +35,15 @@ import Control.Monad.Fix
 
 import GHC.Stack (HasCallStack)
 
+
+import Data.ContBuff
+
+
 -- | The position in the stream. 
 type Position = Int
 
 -- | A @Word8@ buffer, tracking the number of bits.
 newtype Buff = Buff (Int, Word8) deriving (Eq, Ord)
-
-mask :: (FiniteBits a, Num a) => Int -> a -> a
-mask n w = m .&. w
-  where m = setBit zeroBits (n+1) - 1
 
 nullBuff :: Buff
 nullBuff = Buff (0,0)
@@ -92,16 +93,15 @@ data Stream f a = S
   , _len    :: Position
   }
 
+
 deriving instance Eq (f Word8) => Eq (Stream f a)
 deriving instance Ord (f Word8) => Ord (Stream f a)
 
-class Last (f :: * -> *) where last :: f a -> a
-instance Last [] where last = L.last
-
-instance ( Monoid (f Word8)
-         , Foldable f
-         , Traversable f
-         , Applicative f) => Monoid (Stream f a) where
+-- instance ( Monoid (f Word8)
+--         , Foldable f
+--         , Traversable f
+--         , Applicative f) => Monoid (Stream f a) where
+instance Monoid (Stream [] a) where
   mempty = S mempty nullBuff 0
   lhs `mappend` (S _ _ 0) = lhs
   (S _ _ 0) `mappend` rhs = rhs
@@ -118,9 +118,10 @@ instance ( Monoid (f Word8)
                               in case addBuff (Buff (n, l)) b' of
                                    (Just w''', b'') -> S (w <> w'' <> pure w''') b'' (p+p')
                                    (Nothing,   b'') -> S (w <> w'')              b'' (p+p')
-      where go :: (Monoid (t Word8), Applicative t, Foldable t)
-               => Int -> (t Word8, Word8) -> Word8 -> (t Word8, Word8)
-            go n (acc, b) b' = (acc <> pure (b .|. shift b' n), shift b' (n-8))
+      where
+        -- go :: (Monoid (t Word8), Applicative t, Foldable t)
+        --       => Int -> (t Word8, Word8) -> Word8 -> (t Word8, Word8)
+        --    go n (acc, b) b' = (acc <> pure (b .|. shift b' n), shift b' (n-8))
 
             go' :: Int    -- ^ shift
                 -> Word8  -- ^ buff
@@ -130,7 +131,37 @@ instance ( Monoid (f Word8)
             go' n b w = (shift w (n-8), b .|. shift w n) 
 
 -- mappend is not cheap here.
-type ListStream = Stream [] Word8
+type ListStream = BList Word8
+-- type ListStream = Stream [] Word8
+
+class HasWords a where
+  getWords :: a -> [Word8]
+
+instance HasWords (Stream [] Word8) where
+  getWords = _words
+
+instance HasWords (BList Word8) where
+  getWords (BL xs) = map extractWord xs
+    where extractWord :: Buffer Word8 -> Word8
+          extractWord (Full w) = w
+          extractWord (Partial _ w) = w
+
+class ToStream a where
+  mkStream :: [Word8] -> Int -> Word8 -> Position -> a
+
+instance ToStream (Stream [] Word8) where
+  mkStream ws 0 _ p = S ws nullBuff p
+  mkStream ws n b p = S ws (mkBuff n b) p
+
+instance ToStream (BList Word8) where
+  mkStream [] 0 _ _ = BL $ []
+  mkStream ws 0 _ _ = BL $ map Full ws
+  mkStream [] n b _ = BL $ [Partial n $ mask n b]
+  mkStream ws n b _ = BL $ go ws n b
+    where go []     0 _ = []
+          go []     n b = [Partial n $ mask n b]
+          go (w:ws) n b = Full w:go ws n b
+  
 
 newtype Bitstream a = Bitstream { unBitstream :: Position -> (ListStream, Position, a) }
 
@@ -144,7 +175,7 @@ value (_,_,v) = v
 runBitstream :: Position -> Bitstream a -> (ListStream, Position, a)
 runBitstream p (Bitstream f) = f p
 execBitstream :: Position -> Bitstream a -> [Word8]
-execBitstream p a = _words . stream . runBitstream p $ a >> alignWord8
+execBitstream p a = getWords . stream . runBitstream p $ a >> alignWord8
 evalBitstream :: Position -> Bitstream a -> a
 evalBitstream p = value . runBitstream p
 
@@ -156,7 +187,7 @@ instance Functor Bitstream where
 
 -- * Applicative
 instance Applicative Bitstream where
-  pure r = Bitstream $ \pos -> (S mempty nullBuff 0, pos, r)
+  pure r = Bitstream $ \pos -> (mkStream mempty 0 0 0, pos, r)
   x <*> y = Bitstream $ \pos -> let
     (s, pos', f) = unBitstream x pos
     (s', pos'', a) = unBitstream y pos'
@@ -164,7 +195,7 @@ instance Applicative Bitstream where
 
 -- * Monad
 instance Monad Bitstream where
-  return r = Bitstream $ \pos -> (S mempty nullBuff 0, pos, r)
+  return r = Bitstream $ \pos -> (mkStream mempty 0 0 0, pos, r)
   x >>= y = Bitstream $ \pos -> let
     (s, pos', res) = unBitstream x pos
     (s', pos'', res') = unBitstream (y res) pos'
@@ -187,68 +218,68 @@ loc :: Bitstream Position
 loc = Bitstream $ \pos -> (mempty, pos, pos)
 
 locBytes :: Bitstream Word32
-locBytes = Bitstream $ \pos -> (S mempty nullBuff pos, pos, fromIntegral $ pos `div` 8)
+locBytes = Bitstream $ \pos -> (mkStream mempty 0 0 pos, pos, fromIntegral $ pos `div` 8)
 
 locWords :: Bitstream Word32
-locWords = Bitstream $ \pos -> (S mempty nullBuff pos, pos, fromIntegral $ pos `div` 32)
+locWords = Bitstream $ \pos -> (mkStream mempty 0 0 pos, pos, fromIntegral $ pos `div` 32)
 
 emitBit :: Bool -> Bitstream ()
-emitBit True  = Bitstream $ \pos -> (S mempty (Buff (1, 0b00000001)) 1, pos+1, ())
-emitBit False = Bitstream $ \pos -> (S mempty (Buff (1, 0b00000000)) 1, pos+1, ())
+emitBit True  = Bitstream $ \pos -> (mkStream mempty 1 1 1, pos+1, ())
+emitBit False = Bitstream $ \pos -> (mkStream mempty 1 0 1, pos+1, ())
 
 emitBits :: Int -> Word8 -> Bitstream ()
 emitBits 0 _ = pure ()
-emitBits n b | n < 8 = Bitstream $ \pos -> (S mempty (mkBuff n b) n, pos+n, ())
+emitBits n b | n < 8 = Bitstream $ \pos -> (mkStream mempty n b n, pos+n, ())
              | otherwise = error $ "cannot emit " ++ show n ++ " bits from Word8."
 
 emitWord8 :: Word8 -> Bitstream ()
-emitWord8 w = Bitstream $ \pos -> (S [w] nullBuff 8, pos+8, ())
+emitWord8 w = Bitstream $ \pos -> (mkStream [w] 0 0 8, pos+8, ())
 
 emitWord32R :: Word32 -> Bitstream ()
-emitWord32R w = Bitstream $ \pos -> (S [fromIntegral (shift w (-24))
-                                       ,fromIntegral (shift w (-16))
-                                       ,fromIntegral (shift w  (-8))
-                                       ,fromIntegral w] nullBuff 32, pos+32, ())
+emitWord32R w = Bitstream $ \pos -> (mkStream [fromIntegral (shift w (-24))
+                                              ,fromIntegral (shift w (-16))
+                                              ,fromIntegral (shift w  (-8))
+                                              ,fromIntegral w] 0 0 32, pos+32, ())
 emitWord32 :: Word32 -> Bitstream ()
-emitWord32 w = Bitstream $ \pos -> (S [fromIntegral (shift w  (-0))
-                                      ,fromIntegral (shift w  (-8))
-                                      ,fromIntegral (shift w (-16))
-                                      ,fromIntegral (shift w (-24))] nullBuff 32, pos+32, ())
+emitWord32 w = Bitstream $ \pos -> (mkStream [fromIntegral (shift w  (-0))
+                                             ,fromIntegral (shift w  (-8))
+                                             ,fromIntegral (shift w (-16))
+                                             ,fromIntegral (shift w (-24))] 0 0 32, pos+32, ())
 
 emitFixed :: Word64 -> Word64 -> Bitstream ()
 emitFixed 0 _ = pure ()
-emitFixed n w | n < 8  = Bitstream $ \pos -> (S mempty     (mkBuff  n'     (off  0 w)) n', pos+n', ())
-              | n < 16 = Bitstream $ \pos -> (S [off  0 w] (mkBuff (n'-8)  (off  8 w)) n', pos+n', ())
-              | n < 24 = Bitstream $ \pos -> (S [off  0 w
-                                                ,off  8 w] (mkBuff (n'-16) (off 16 w)) n', pos+n', ())
-              | n < 32 = Bitstream $ \pos -> (S [off  0 w
-                                                ,off  8 w
-                                                ,off 16 w] (mkBuff (n'-24) (off 24 w)) n', pos+n', ())
-              | n < 40 = Bitstream $ \pos -> (S [off  0 w
-                                                ,off  8 w
-                                                ,off 16 w
-                                                ,off 24 w] (mkBuff (n'-32) (off 32 w)) n', pos+n', ())
-              | n < 48 = Bitstream $ \pos -> (S [off  0 w
-                                                ,off  8 w
-                                                ,off 16 w
-                                                ,off 24 w
-                                                ,off 32 w] (mkBuff (n'-40) (off 40 w)) n', pos+n', ())
-              | n < 56 = Bitstream $ \pos -> (S [off  0 w
-                                                ,off  8 w
-                                                ,off 16 w
-                                                ,off 24 w
-                                                ,off 32 w
-                                                ,off 40 w] (mkBuff (n'-48) (off 48 w)) n', pos+n', ())
-              | n < 64 = Bitstream $ \pos -> (S [off  0 w
-                                                ,off  8 w
-                                                ,off 16 w
-                                                ,off 24 w
-                                                ,off 32 w
-                                                ,off 40 w
-                                                ,off 48 w] (mkBuff (n'-56) (off 56 w)) n', pos+n', ())
-              | n == 64 = Bitstream $ \pos -> (S [ off  0 w, off  8 w, off 16 w, off 24 w
-                                                 , off 32 w, off 40 w, off 48 w, off 56 w]
-                                               nullBuff
+emitFixed n w | n < 8  = Bitstream $ \pos -> (mkStream mempty       n'     (off  0 w) n', pos+n', ())
+              | n < 16 = Bitstream $ \pos -> (mkStream [off  0 w]  (n'-8)  (off  8 w) n', pos+n', ())
+              | n < 24 = Bitstream $ \pos -> (mkStream [off  0 w
+                                                       ,off  8 w]  (n'-16) (off 16 w) n', pos+n', ())
+              | n < 32 = Bitstream $ \pos -> (mkStream [off  0 w
+                                                       ,off  8 w
+                                                       ,off 16 w]  (n'-24) (off 24 w) n', pos+n', ())
+              | n < 40 = Bitstream $ \pos -> (mkStream [off  0 w
+                                                       ,off  8 w
+                                                       ,off 16 w
+                                                       ,off 24 w]  (n'-32) (off 32 w) n', pos+n', ())
+              | n < 48 = Bitstream $ \pos -> (mkStream [off  0 w
+                                                       ,off  8 w
+                                                       ,off 16 w
+                                                       ,off 24 w
+                                                       ,off 32 w]  (n'-40) (off 40 w) n', pos+n', ())
+              | n < 56 = Bitstream $ \pos -> (mkStream [off  0 w
+                                                       ,off  8 w
+                                                       ,off 16 w
+                                                       ,off 24 w
+                                                       ,off 32 w
+                                                       ,off 40 w]  (n'-48) (off 48 w) n', pos+n', ())
+              | n < 64 = Bitstream $ \pos -> (mkStream [off  0 w
+                                                       ,off  8 w
+                                                       ,off 16 w
+                                                       ,off 24 w
+                                                       ,off 32 w
+                                                       ,off 40 w
+                                                       ,off 48 w] (n'-56) (off 56 w) n', pos+n', ())
+              | n == 64 = Bitstream $ \pos -> (mkStream [ off  0 w, off  8 w, off 16 w, off 24 w
+                                                        , off 32 w, off 40 w, off 48 w, off 56 w]
+                                               0 0
                                                64, pos+n', ())
               | otherwise = error $ "invalid number of bits. Cannot emit " ++ show n ++ " bits from Word64."
     where off :: Int -> Word64 -> Word8
@@ -341,13 +372,15 @@ showWord8 w = '0':'b':(map f $ [testBit w i | i <- [0..7]])
   where f True  = '1'
         f False = '0'
 
+showWord8' :: Word8 -> String
+showWord8' w = map f $ [testBit w i | i <- [0..7]]
+  where f True = '1'
+        f False = '0'
+
 instance Show Buff where
   show (Buff (n, w)) = show n ++ " bits: " ++ showWord8 w
 
 instance (Functor f, Foldable f) => Show (Stream f a) where
   show (S ws (Buff (n,b)) p) | null ws = show p ++ " bits: " ++ take n (showWord8' b)
                              | otherwise = show p ++ " bits: " ++ foldl1 (\x y -> x ++ " " ++ y) (fmap showWord8' ws) ++ " " ++ take n (showWord8' b)
-    where showWord8' w = map f $ [testBit w i | i <- [0..7]]
-          f True = '1'
-          f False = '0'
-
+                             
