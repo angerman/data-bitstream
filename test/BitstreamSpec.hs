@@ -158,6 +158,7 @@ spec_bitstream = do
       evalBitstream 0 (loc) `shouldBe` 0
       evalBitstream 0 (emitBit True >> loc) `shouldBe` 1
       evalBitstream 0 (emitBit True >> emitBit False >> loc) `shouldBe` 2
+      evalBitstream 0 (bitstream [] (Buff 1 1) 1 >> bitstream [] (Buff 6 0) 6 >> loc) `shouldBe` 7
       evalBitstream 0 (emitBit True >> alignWord8 >> loc) `shouldBe` 8
 
     it "should produce word aligned results" $ do

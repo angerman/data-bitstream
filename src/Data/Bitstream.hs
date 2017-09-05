@@ -1,8 +1,8 @@
 {-# OPTIONS_GHC -fprof-auto #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving, StandaloneDeriving, KindSignatures, BinaryLiterals, RecursiveDo, LambdaCase, RankNTypes, FlexibleContexts, BangPatterns #-}
 module Data.Bitstream
-  ( Buff, nullBuff, addBuff, mkBuff
-  , Bitstream, execBitstream, evalBitstream, runBitstream
+  ( nullBuff, addBuff, mkBuff
+  , execBitstream, evalBitstream, runBitstream
   -- * Monadic interface
   , withOffset
   -- ** locations
@@ -18,7 +18,7 @@ module Data.Bitstream
   -- ** writing
   , writeFile, withHeader
   -- ** For testing
-  , Stream(..), Buff(..), Bitstream(..)
+  , Stream(..), Buff(..), Bitstream(..), bitstream
   ) where
 
 import Prelude hiding (last, words, writeFile, tail)
@@ -36,6 +36,8 @@ import Data.Monoid ((<>))
 import Control.Monad.Fix
 
 import GHC.Stack (HasCallStack)
+
+import Debug.Trace
 
 -- | The position in the stream.
 type Position = Int
@@ -133,20 +135,20 @@ instance ( Monoid (f Word8)
                         -> Word8  -- ^ buff
                         -> Word8  -- ^ input
                         -> ( Word8   -- ^ new buff
-                          , Word8 ) -- ^ output
+                           , Word8 ) -- ^ output
                     go' !n !b !w = (shift w (n-8), b .|. shift w n)
     in r
 
-  {-# SPECIALIZE instance Monoid (Stream Seq a) #-}
-  {-# SPECIALIZE instance Monoid (Stream [] a) #-}
+--  {-# SPECIALIZE instance Monoid (Stream Seq a) #-}
+--   {-# SPECIALIZE instance Monoid (Stream [] a) #-}
 
 instance Monoid (Streams f a) where
   mempty = Streams mempty 0
   lhs `mappend` (Streams _ 0) = lhs
   (Streams _ 0) `mappend` rhs = rhs
   (Streams ss1 p1) `mappend` (Streams ss2 p2) = Streams (ss1 <> ss2) (p1 + p2)
-  {-# SPECIALIZE instance Monoid (Streams Seq a) #-}
-  {-# SPECIALIZE instance Monoid (Streams [] a) #-}
+--  {-# SPECIALIZE instance Monoid (Streams Seq a) #-}
+--  {-# SPECIALIZE instance Monoid (Streams [] a) #-}
 
 -- mappend is not cheap here.
 type ListStream = Stream [] Word8
@@ -155,12 +157,12 @@ type SeqStreams = Streams Seq  Word8
 toListStream :: Foldable f => Stream f a -> Stream [] a
 toListStream (S w b p) = S (toList w) b p
 
-{-# SPECIALIZE toListStream :: Stream Seq a -> Stream [] a #-}
+-- {-# SPECIALIZE toListStream :: Stream Seq a -> Stream [] a #-}
 
-runStreams :: (Monoid (Stream f a)) => Streams f a -> Stream f a
+runStreams :: Streams Seq a -> Stream Seq a
 runStreams (Streams ss _) = foldl' mappend mempty ss
 
-{-# SPECIALIZE runStreams :: Streams Seq a -> Stream Seq a #-}
+-- {-# SPECIALIZE runStreams :: Streams Seq a -> Stream Seq a #-}
 
 data BitstreamState = BitstreamState !SeqStreams !Position
 
@@ -188,11 +190,11 @@ streams w b p
   | p == 0 = mempty
   | otherwise = Streams (pure $ S (Seq.fromList . toList $ w) b p) p
 
-{-# SPECIALIZE streams :: [Word8] -> Buff -> Position -> SeqStreams #-}
+-- {-# SPECIALIZE streams :: [Word8] -> Buff -> Position -> SeqStreams #-}
 bitstream :: Foldable f => f Word8 -> Buff -> Int -> Bitstream ()
 bitstream w b p = Bitstream $ modify' $ \(BitstreamState ss p') -> BitstreamState (ss <> streams w b p) (p + p')
 
-{-# SPECIALIZE bitstream :: [Word8] -> Buff -> Int -> Bitstream () #-}
+--{-# SPECIALIZE bitstream :: [Word8] -> Buff -> Int -> Bitstream () #-}
 -- Monadic Bitstream API
 
 withOffset :: Int -> Bitstream a -> Bitstream a
@@ -217,8 +219,12 @@ emitBit False = bitstream [] (Buff 1 0b00000000) 1
 
 emitBits :: Int -> Word8 -> Bitstream ()
 emitBits 0 _ = pure ()
-emitBits n b | n < 8 = bitstream [] (mkBuff n b) n
-             | otherwise = error $ "cannot emit " ++ show n ++ " bits from Word8."
+emitBits n b  | n < 8 = do
+                 -- traceM $ "emitting " ++ show n ++ " bits; value = " ++ show b
+                 let buff = mkBuff n b
+                 --traceM $ "buffer " ++ show buff
+                 bitstream [] buff n
+              | otherwise = error $ "cannot emit " ++ show n ++ " bits from Word8."
 
 emitWord8 :: Word8 -> Bitstream ()
 emitWord8 w = bitstream [w] nullBuff 8
@@ -293,9 +299,11 @@ emitChar6 c | 'a' <= c && c <= 'z' = emitBits 6 . fromIntegral $ (fromEnum c - f
             | otherwise = fail $ "char '" ++ c:"' not in [a-zA-Z0-9._]"
 
 alignWord8 :: Bitstream ()
-alignWord8 = flip mod 8 <$> loc >>= \case
-  0 -> pure ()
-  x -> emitBits (8 - x) 0
+alignWord8 = do
+  bits <- (`mod` 8) <$> loc
+  case bits of
+    0 -> pure ()
+    x -> emitBits (8 - x) 0
 
 alignWord32 :: Bitstream ()
 alignWord32 = flip mod 32 <$> loc >>= \case
